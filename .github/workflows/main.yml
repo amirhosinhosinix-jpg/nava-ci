@@ -9,27 +9,34 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      # 1. دریافت سورس از مخزن خودت (تغییر به Nava-Android)
+
+      # 1. دریافت سورس بدون ساب‌ماژول
       - name: Checkout My Telegram Source
         uses: actions/checkout@v4
         with:
-          repository: amirhosinhosinix-jpg/Nava-Android   # ← اینجا را به ریپوی خودت تغییر بده
+          repository: amirhosinhosinix-jpg/Nava-Android
           ref: master
-          submodules: recursive
+          submodules: false          # ← تغییر اصلی: غیرفعال کردن clone بازگشتی
           fetch-depth: 1
 
-      # 2. Java 17
+      # 2. دریافت کم‌عمق ساب‌ماژول‌ها (سریع‌تر)
+      - name: Init and update submodules (shallow)
+        run: |
+          git submodule init
+          git submodule update --depth=1 --recursive --jobs=4
+
+      # 3. Java 17
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Android SDK
+      # 4. Android SDK
       - name: Setup Android
         uses: android-actions/setup-android@v4
 
-      # 4. آزادسازی فضا
+      # 5. آزادسازی فضا
       - name: Free disk space
         run: |
           echo "=== BEFORE CLEANUP ==="
@@ -44,44 +51,26 @@ jobs:
           echo "=== AFTER CLEANUP ==="
           df -h
 
-      # 5. بررسی سورس (مسیر فایل نیاز به تأیید دارد)
+      # 6. بررسی سورس
       - name: Verify Telegram Source
         run: |
           set -e
-          echo "================================"
-          echo "VERIFYING TELEGRAM SOURCE"
-          echo "================================"
-          echo "Repository:"
+          echo "=== VERIFYING TELEGRAM SOURCE ==="
           git remote -v
-          echo
-          echo "Current commit:"
           git rev-parse HEAD
-          echo
-          echo "Current branch:"
           git branch --show-current
-          echo
-          echo "Checking gradlew..."
           test -f gradlew || { echo "ERROR: gradlew not found!"; exit 1; }
-          echo
-          echo "Checking settings.gradle..."
           test -f settings.gradle || { echo "ERROR: settings.gradle not found!"; exit 1; }
-          echo
-          # ⚠️ مسیر زیر را بر اساس ساختار واقعی ریپوی خودت بررسی کن
-          # در نسخه اصلی Telegram معمولاً core_settings.gradle در مسیر TMessagesProj/jni/ قرار دارد
           if [ -f "TMessagesProj_Modules/media/core_settings.gradle" ]; then
-            echo "Found at TMessagesProj_Modules/media/core_settings.gradle"
+            echo "Found: TMessagesProj_Modules/media/core_settings.gradle"
           elif [ -f "TMessagesProj/jni/core_settings.gradle" ]; then
-            echo "Found at TMessagesProj/jni/core_settings.gradle"
+            echo "Found: TMessagesProj/jni/core_settings.gradle"
           else
-            echo "WARNING: core_settings.gradle not found at expected paths, continuing anyway..."
-            # exit 1 را کامنت کن تا بیلد متوقف نشود
+            echo "WARNING: core_settings.gradle not found, continuing..."
           fi
-          echo
-          echo "================================"
-          echo "SOURCE CHECK PASSED"
-          echo "================================"
+          echo "=== SOURCE CHECK PASSED ==="
 
-      # 6. نصب Android SDK و NDK
+      # 7. نصب Android SDK و NDK
       - name: Install Android SDK and NDK
         run: |
           yes | sdkmanager --licenses || true
@@ -93,16 +82,14 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
-      # 7-13. (بدون تغییر: بررسی فضا، ARM64، پیکربندی Gradle، ccache و غیره)
+      # 8. بررسی فضا
       - name: Check disk after NDK
         run: |
-          echo "=== DISK ==="
           df -h
-          echo "=== ANDROID SDK SIZE ==="
           du -sh "$ANDROID_HOME" 2>/dev/null || true
-          echo "=== NDK SIZE ==="
           du -sh "$ANDROID_HOME/ndk/27.2.12479018" 2>/dev/null || true
 
+      # 9. فقط ARM64
       - name: Keep only arm64-v8a
         run: |
           grep -rlE "abiFilters|armeabi-v7a" \
@@ -115,6 +102,7 @@ jobs:
             sed -i -E '/include +"armeabi-v7a"/ s/include.*/include "arm64-v8a"/' "$f" || true
           done
 
+      # 10. تنظیمات Gradle
       - name: Configure Gradle
         run: |
           mkdir -p ~/.gradle
@@ -126,6 +114,7 @@ jobs:
           android.useAndroidX=true
           EOF
 
+      # 11. ccache
       - name: Install ccache
         run: |
           sudo apt-get update
@@ -133,6 +122,7 @@ jobs:
           ccache --max-size=2G
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
+      # 12. Cache ccache
       - name: Cache ccache
         uses: actions/cache@v4
         with:
@@ -141,6 +131,7 @@ jobs:
           restore-keys: |
             ccache-${{ runner.os }}-
 
+      # 13. Cache Gradle
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -151,20 +142,18 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
+      # 14. فضای قبل از Build
       - name: Check disk before build
         run: |
-          echo "=== DISK BEFORE BUILD ==="
           df -h
-          echo "=== GRADLE ==="
           du -sh ~/.gradle 2>/dev/null || true
-          echo "=== CCACHE ==="
           du -sh ~/.ccache 2>/dev/null || true
 
-      # 14. مجوز اجرا
+      # 15. مجوز اجرا
       - name: Make Gradle executable
         run: chmod +x gradlew
 
-      # 15. بیلد
+      # 16. بیلد
       - name: Build Telegram Debug APK
         run: |
           ./gradlew assembleDebug \
@@ -175,13 +164,12 @@ jobs:
           CC: ccache clang
           CXX: ccache clang++
 
-      # 16-18. یافتن و آپلود APK
+      # 17. پیدا کردن APK
       - name: Find APK
         if: success()
-        run: |
-          echo "=== APK FILES ==="
-          find . -type f -name "*.apk" -exec ls -lh {} \;
+        run: find . -type f -name "*.apk" -exec ls -lh {} \;
 
+      # 18. آپلود APK
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -191,8 +179,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # 19. فضای نهایی
       - name: Final disk usage
         if: always()
-        run: |
-          echo "=== FINAL DISK ==="
-          df -h
+        run: df -h
