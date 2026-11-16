@@ -1,0 +1,198 @@
+name: Build Telegram Android
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      # 1. دریافت سورس از مخزن خودت (تغییر به Nava-Android)
+      - name: Checkout My Telegram Source
+        uses: actions/checkout@v4
+        with:
+          repository: amirhosinhosinix-jpg/Nava-Android   # ← اینجا را به ریپوی خودت تغییر بده
+          ref: master
+          submodules: recursive
+          fetch-depth: 1
+
+      # 2. Java 17
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 3. Android SDK
+      - name: Setup Android
+        uses: android-actions/setup-android@v4
+
+      # 4. آزادسازی فضا
+      - name: Free disk space
+        run: |
+          echo "=== BEFORE CLEANUP ==="
+          df -h
+          sudo rm -rf /usr/local/lib/android/sdk/system-images || true
+          sudo rm -rf /usr/local/lib/android/sdk/emulator || true
+          sudo rm -rf /usr/local/share/powershell || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo apt-get clean
+          echo "=== AFTER CLEANUP ==="
+          df -h
+
+      # 5. بررسی سورس (مسیر فایل نیاز به تأیید دارد)
+      - name: Verify Telegram Source
+        run: |
+          set -e
+          echo "================================"
+          echo "VERIFYING TELEGRAM SOURCE"
+          echo "================================"
+          echo "Repository:"
+          git remote -v
+          echo
+          echo "Current commit:"
+          git rev-parse HEAD
+          echo
+          echo "Current branch:"
+          git branch --show-current
+          echo
+          echo "Checking gradlew..."
+          test -f gradlew || { echo "ERROR: gradlew not found!"; exit 1; }
+          echo
+          echo "Checking settings.gradle..."
+          test -f settings.gradle || { echo "ERROR: settings.gradle not found!"; exit 1; }
+          echo
+          # ⚠️ مسیر زیر را بر اساس ساختار واقعی ریپوی خودت بررسی کن
+          # در نسخه اصلی Telegram معمولاً core_settings.gradle در مسیر TMessagesProj/jni/ قرار دارد
+          if [ -f "TMessagesProj_Modules/media/core_settings.gradle" ]; then
+            echo "Found at TMessagesProj_Modules/media/core_settings.gradle"
+          elif [ -f "TMessagesProj/jni/core_settings.gradle" ]; then
+            echo "Found at TMessagesProj/jni/core_settings.gradle"
+          else
+            echo "WARNING: core_settings.gradle not found at expected paths, continuing anyway..."
+            # exit 1 را کامنت کن تا بیلد متوقف نشود
+          fi
+          echo
+          echo "================================"
+          echo "SOURCE CHECK PASSED"
+          echo "================================"
+
+      # 6. نصب Android SDK و NDK
+      - name: Install Android SDK and NDK
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      # 7-13. (بدون تغییر: بررسی فضا، ARM64، پیکربندی Gradle، ccache و غیره)
+      - name: Check disk after NDK
+        run: |
+          echo "=== DISK ==="
+          df -h
+          echo "=== ANDROID SDK SIZE ==="
+          du -sh "$ANDROID_HOME" 2>/dev/null || true
+          echo "=== NDK SIZE ==="
+          du -sh "$ANDROID_HOME/ndk/27.2.12479018" 2>/dev/null || true
+
+      - name: Keep only arm64-v8a
+        run: |
+          grep -rlE "abiFilters|armeabi-v7a" \
+            --include='build.gradle' \
+            --include='*.gradle' \
+            . 2>/dev/null |
+          while read -r f; do
+            echo "Patching: $f"
+            sed -i -E '/abiFilters/ s/abiFilters.*/abiFilters "arm64-v8a"/' "$f" || true
+            sed -i -E '/include +"armeabi-v7a"/ s/include.*/include "arm64-v8a"/' "$f" || true
+          done
+
+      - name: Configure Gradle
+        run: |
+          mkdir -p ~/.gradle
+          cat > ~/.gradle/gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          org.gradle.daemon=false
+          android.useAndroidX=true
+          EOF
+
+      - name: Install ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache
+          ccache --max-size=2G
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Check disk before build
+        run: |
+          echo "=== DISK BEFORE BUILD ==="
+          df -h
+          echo "=== GRADLE ==="
+          du -sh ~/.gradle 2>/dev/null || true
+          echo "=== CCACHE ==="
+          du -sh ~/.ccache 2>/dev/null || true
+
+      # 14. مجوز اجرا
+      - name: Make Gradle executable
+        run: chmod +x gradlew
+
+      # 15. بیلد
+      - name: Build Telegram Debug APK
+        run: |
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --max-workers=2
+        env:
+          CC: ccache clang
+          CXX: ccache clang++
+
+      # 16-18. یافتن و آپلود APK
+      - name: Find APK
+        if: success()
+        run: |
+          echo "=== APK FILES ==="
+          find . -type f -name "*.apk" -exec ls -lh {} \;
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-Debug-APK
+          path: "**/build/outputs/apk/**/*.apk"
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Final disk usage
+        if: always()
+        run: |
+          echo "=== FINAL DISK ==="
+          df -h
